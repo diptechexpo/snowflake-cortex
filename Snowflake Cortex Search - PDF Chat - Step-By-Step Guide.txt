@@ -1,0 +1,351 @@
+Step-1: Create database and warehouse
+
+CREATE DATABASE IF NOT EXISTS cortex_search_tutorial_db;
+
+CREATE OR REPLACE WAREHOUSE cortex_search_tutorial_wh WITH
+     WAREHOUSE_SIZE='X-SMALL'
+     AUTO_SUSPEND = 120
+     AUTO_RESUME = TRUE
+     INITIALLY_SUSPENDED=TRUE;
+
+ USE WAREHOUSE cortex_search_tutorial_wh;
+ 
+
+Step-2: Create Stage where the files will be uploaded.
+
+CREATE OR REPLACE STAGE cortex_search_tutorial_db.public.fomc
+    DIRECTORY = (ENABLE = TRUE)
+    ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
+	
+
+Step-3: Upload the PDF files into the newly created Stage from Snowsight portal. The database and schema to be chosen are cortex_search_tutorial_db and public respectively.
+
+
+Step-4: Now I have to create a new UDF(user-defined-function) to parse the PDF files.
+CREATE OR REPLACE FUNCTION cortex_search_tutorial_db.public.pdf_text_chunker(file_url STRING)
+    RETURNS TABLE (chunk VARCHAR)
+    LANGUAGE PYTHON
+    RUNTIME_VERSION = '3.9'
+    HANDLER = 'pdf_text_chunker'
+    PACKAGES = ('snowflake-snowpark-python', 'PyPDF2', 'langchain')
+    AS
+$$
+from snowflake.snowpark.types import StringType, StructField, StructType
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from snowflake.snowpark.files import SnowflakeFile
+import PyPDF2, io
+import logging
+import pandas as pd
+
+class pdf_text_chunker:
+
+    def read_pdf(self, file_url: str) -> str:
+        logger = logging.getLogger("udf_logger")
+        logger.info(f"Opening file {file_url}")
+
+        with SnowflakeFile.open(file_url, 'rb') as f:
+            buffer = io.BytesIO(f.readall())
+
+        reader = PyPDF2.PdfReader(buffer)
+        text = ""
+        for page in reader.pages:
+            try:
+                text += page.extract_text().replace('\n', ' ').replace('\0', ' ')
+            except:
+                text = "Unable to Extract"
+                logger.warn(f"Unable to extract from file {file_url}, page {page}")
+
+        return text
+
+    def process(self, file_url: str):
+        text = self.read_pdf(file_url)
+
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size = 2000,  # Adjust this as needed
+            chunk_overlap = 300,  # Overlap to keep chunks contextual
+            length_function = len
+        )
+
+        chunks = text_splitter.split_text(text)
+        df = pd.DataFrame(chunks, columns=['chunk'])
+
+        yield from df.itertuples(index=False, name=None)
+$$;
+
+
+
+Step-5: Now create a table to hold parsed data from PDF files.
+
+CREATE OR REPLACE TABLE cortex_search_tutorial_db.public.docs_chunks_table AS
+    SELECT
+        relative_path,
+        build_scoped_file_url(@cortex_search_tutorial_db.public.fomc, relative_path) AS file_url,
+        -- preserve file title information by concatenating relative_path with the chunk
+        CONCAT(relative_path, ': ', func.chunk) AS chunk,
+        'English' AS language
+    FROM
+        directory(@cortex_search_tutorial_db.public.fomc),
+        TABLE(cortex_search_tutorial_db.public.pdf_text_chunker(build_scoped_file_url(@cortex_search_tutorial_db.public.fomc, relative_path))) AS func;
+		
+		
+Step-6: Now create the cortex search service. It takes a while to create the service. snowflake and snowflake-ml-python package needs to be chosen as dependency for the code to run.
+Delete the comments as due to misalignment of these, code fails to run.
+
+CREATE OR REPLACE CORTEX SEARCH SERVICE cortex_search_tutorial_db.public.fomc_meeting
+    ON chunk
+    ATTRIBUTES language
+    WAREHOUSE = cortex_search_tutorial_wh
+    TARGET_LAG = '1 hour'
+    AS (
+    SELECT
+        chunk,
+        relative_path,
+        file_url,
+        language
+    FROM cortex_search_tutorial_db.public.docs_chunks_table
+    );
+
+	
+Step-7: Create a Streamlit App which will essentially produce the UI to test the chat PDF. 
+
+import streamlit as st
+from snowflake.core import Root # requires snowflake>=0.8.0
+from snowflake.cortex import Complete
+from snowflake.snowpark.context import get_active_session
+
+
+MODELS = [
+    "mistral-large2",
+    "llama3.1-70b",
+    "llama3.1-8b",
+]
+
+def init_messages():
+
+    if st.session_state.clear_conversation or "messages" not in st.session_state:
+        st.session_state.messages = []
+
+
+def init_service_metadata():
+
+    if "service_metadata" not in st.session_state:
+        services = session.sql("SHOW CORTEX SEARCH SERVICES;").collect()
+        service_metadata = []
+        if services:
+            for s in services:
+                svc_name = s["name"]
+                svc_search_col = session.sql(
+                    f"DESC CORTEX SEARCH SERVICE {svc_name};"
+                ).collect()[0]["search_column"]
+                service_metadata.append(
+                    {"name": svc_name, "search_column": svc_search_col}
+                )
+
+        st.session_state.service_metadata = service_metadata
+
+
+def init_config_options():
+
+    st.sidebar.selectbox(
+        "Select cortex search service:",
+        [s["name"] for s in st.session_state.service_metadata],
+        key="selected_cortex_search_service",
+    )
+
+    st.sidebar.button("Clear conversation", key="clear_conversation")
+    st.sidebar.toggle("Debug", key="debug", value=False)
+    st.sidebar.toggle("Use chat history", key="use_chat_history", value=True)
+
+    with st.sidebar.expander("Advanced options"):
+        st.selectbox("Select model:", MODELS, key="model_name")
+        st.number_input(
+            "Select number of context chunks",
+            value=5,
+            key="num_retrieved_chunks",
+            min_value=1,
+            max_value=10,
+        )
+        st.number_input(
+            "Select number of messages to use in chat history",
+            value=5,
+            key="num_chat_messages",
+            min_value=1,
+            max_value=10,
+        )
+
+    st.sidebar.expander("Session State").write(st.session_state)
+
+
+def query_cortex_search_service(query, columns = [], filter={}):
+
+    db, schema = session.get_current_database(), session.get_current_schema()
+
+    cortex_search_service = (
+        root.databases[db]
+        .schemas[schema]
+        .cortex_search_services[st.session_state.selected_cortex_search_service]
+    )
+
+    context_documents = cortex_search_service.search(
+        query, columns=columns, filter=filter, limit=st.session_state.num_retrieved_chunks
+    )
+    results = context_documents.results
+
+    service_metadata = st.session_state.service_metadata
+    search_col = [s["search_column"] for s in service_metadata
+                    if s["name"] == st.session_state.selected_cortex_search_service][0].lower()
+
+    context_str = ""
+    for i, r in enumerate(results):
+        context_str += f"Context document {i+1}: {r[search_col]} \n" + "\n"
+
+    if st.session_state.debug:
+        st.sidebar.text_area("Context documents", context_str, height=500)
+
+    return context_str, results
+
+
+def get_chat_history():
+
+    start_index = max(
+        0, len(st.session_state.messages) - st.session_state.num_chat_messages
+    )
+    return st.session_state.messages[start_index : len(st.session_state.messages) - 1]
+
+
+def complete(model, prompt):
+
+    return Complete(model, prompt).replace("$", "\$")
+
+
+def make_chat_history_summary(chat_history, question):
+
+    prompt = f"""
+        [INST]
+        Based on the chat history below and the question, generate a query that extend the question
+        with the chat history provided. The query should be in natural language.
+        Answer with only the query. Do not add any explanation.
+
+        <chat_history>
+        {chat_history}
+        </chat_history>
+        <question>
+        {question}
+        </question>
+        [/INST]
+    """
+
+    summary = complete(st.session_state.model_name, prompt)
+
+    if st.session_state.debug:
+        st.sidebar.text_area(
+            "Chat history summary", summary.replace("$", "\$"), height=150
+        )
+
+    return summary
+
+
+def create_prompt(user_question):
+
+    if st.session_state.use_chat_history:
+        chat_history = get_chat_history()
+        if chat_history != []:
+            question_summary = make_chat_history_summary(chat_history, user_question)
+            prompt_context, results = query_cortex_search_service(
+                question_summary,
+                columns=["chunk", "file_url", "relative_path"],
+                filter={"@and": [{"@eq": {"language": "English"}}]},
+            )
+        else:
+            prompt_context, results = query_cortex_search_service(
+                user_question,
+                columns=["chunk", "file_url", "relative_path"],
+                filter={"@and": [{"@eq": {"language": "English"}}]},
+            )
+    else:
+        prompt_context, results = query_cortex_search_service(
+            user_question,
+            columns=["chunk", "file_url", "relative_path"],
+            filter={"@and": [{"@eq": {"language": "English"}}]},
+        )
+        chat_history = ""
+
+    prompt = f"""
+            [INST]
+            You are a helpful AI chat assistant with RAG capabilities. When a user asks you a question,
+            you will also be given context provided between <context> and </context> tags. Use that context
+            with the user's chat history provided in the between <chat_history> and </chat_history> tags
+            to provide a summary that addresses the user's question. Ensure the answer is coherent, concise,
+            and directly relevant to the user's question.
+
+            If the user asks a generic question which cannot be answered with the given context or chat_history,
+            just say "I don't know the answer to that question.
+
+            Don't saying things like "according to the provided context".
+
+            <chat_history>
+            {chat_history}
+            </chat_history>
+            <context>
+            {prompt_context}
+            </context>
+            <question>
+            {user_question}
+            </question>
+            [/INST]
+            Answer:
+            """
+    return prompt, results
+
+
+def main():
+    st.title(f":speech_balloon: Chatbot with Snowflake Cortex")
+
+    init_service_metadata()
+    init_config_options()
+    init_messages()
+
+    icons = {"assistant": "❄️", "user": "👤"}
+
+    # Display chat messages from history on app rerun
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"], avatar=icons[message["role"]]):
+            st.markdown(message["content"])
+
+    disable_chat = (
+        "service_metadata" not in st.session_state
+        or len(st.session_state.service_metadata) == 0
+    )
+    if question := st.chat_input("Ask a question...", disabled=disable_chat):
+        # Add user message to chat history
+        st.session_state.messages.append({"role": "user", "content": question})
+        # Display user message in chat message container
+        with st.chat_message("user", avatar=icons["user"]):
+            st.markdown(question.replace("$", "\$"))
+
+        # Display assistant response in chat message container
+        with st.chat_message("assistant", avatar=icons["assistant"]):
+            message_placeholder = st.empty()
+            question = question.replace("'", "")
+            prompt, results = create_prompt(question)
+            with st.spinner("Thinking..."):
+                generated_response = complete(
+                    st.session_state.model_name, prompt
+                )
+                # build references table for citation
+                markdown_table = "###### References \n\n| PDF Title | URL |\n|-------|-----|\n"
+                for ref in results:
+                    markdown_table += f"| {ref['relative_path']} | [Link]({ref['file_url']}) |\n"
+                message_placeholder.markdown(generated_response + "\n\n" + markdown_table)
+
+        st.session_state.messages.append(
+            {"role": "assistant", "content": generated_response}
+        )
+
+
+if __name__ == "__main__":
+    session = get_active_session()
+    root = Root(session)
+    main()
+
+Step-8: Ask questions to chat.
