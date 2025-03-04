@@ -111,7 +111,7 @@ FILE_FORMAT = (
 ON_ERROR=CONTINUE
 FORCE = TRUE ;
 
-Step4: Load the 3 data files and the semantic model YAML file into Stage zone in Snowflake.
+Step4: Load the 3 data files and the semantic model YAML file into Stage zone in Snowflake. Choose database cortex_analyst_demo as database and raw_data as stage.
 
 Step5: Create Python file in your local workstation. Make sure Streamlit and Snowflake-Connetor for Python are installed.
 
