@@ -107,6 +107,7 @@ CREATE OR REPLACE CORTEX SEARCH SERVICE cortex_search_tutorial_db.public.fomc_me
 
 	
 Step-7: Create a Streamlit App which will essentially produce the UI to test the chat PDF. During this step, choose the corext search database, warehouse and the public schema when prompted. snowflake and snowflake-ml-python package needs to be chosen as dependency for the code to run.
+The snowflake package needs to be chosen as 0.8.0. Choosing a higher version throws a conflict error with snowflake-connector-python package.
 
 import streamlit as st
 from snowflake.core import Root # requires snowflake>=0.8.0
