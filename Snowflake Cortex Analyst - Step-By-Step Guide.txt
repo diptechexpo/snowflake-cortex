@@ -114,6 +114,6 @@ ON_ERROR=CONTINUE
 FORCE = TRUE ;
 
 
-Step6: Create Python file in your local workstation. Make sure Streamlit and Snowflake-Connector for Python are installed.
+Step6: Create Python file in your local workstation. Make sure streamlit and snowflake-connector-python for Python are installed.
 
-Step7: Provide the HOST, ACCOUNT, USER, PASSWORD and ROLE. Make sure the HOST parameter value is your login URL which is in https://<organization-account>.snowflakecomputing.com format.
+Step7: Provide the HOST, ACCOUNT, USER, PASSWORD and ROLE. Make sure the HOST parameter value is your login URL(without https://) which is in <organization-account>.snowflakecomputing.com format.
