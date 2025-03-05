@@ -18,10 +18,11 @@ CREATE OR REPLACE STAGE cortex_search_tutorial_db.public.fomc
     ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
 	
 
-Step-3: Upload the PDF files into the newly created Stage from Snowsight portal. The database and schema to be chosen are cortex_search_tutorial_db and public respectively.
+Step-3: Upload the PDF files into the newly created Stage from Snowsight portal. The database and schema to be chosen are cortex_search_tutorial_db and public respectively. Stage should be chosen as FOMC.
 
 
-Step-4: Now I have to create a new UDF(user-defined-function) to parse the PDF files.
+Step-4: Now I have to create a new UDF(user-defined-function) to parse the PDF files. This work also needs to be done in a SQL worksheet and choose cortex_search_tutorial_db as the database and public as schema.
+
 CREATE OR REPLACE FUNCTION cortex_search_tutorial_db.public.pdf_text_chunker(file_url STRING)
     RETURNS TABLE (chunk VARCHAR)
     LANGUAGE PYTHON
@@ -88,8 +89,7 @@ CREATE OR REPLACE TABLE cortex_search_tutorial_db.public.docs_chunks_table AS
         TABLE(cortex_search_tutorial_db.public.pdf_text_chunker(build_scoped_file_url(@cortex_search_tutorial_db.public.fomc, relative_path))) AS func;
 		
 		
-Step-6: Now create the cortex search service. It takes a while to create the service. snowflake and snowflake-ml-python package needs to be chosen as dependency for the code to run.
-Delete the comments as due to misalignment of these, code fails to run.
+Step-6: Now create the cortex search service. It takes a while to create the service.
 
 CREATE OR REPLACE CORTEX SEARCH SERVICE cortex_search_tutorial_db.public.fomc_meeting
     ON chunk
@@ -106,7 +106,7 @@ CREATE OR REPLACE CORTEX SEARCH SERVICE cortex_search_tutorial_db.public.fomc_me
     );
 
 	
-Step-7: Create a Streamlit App which will essentially produce the UI to test the chat PDF. 
+Step-7: Create a Streamlit App which will essentially produce the UI to test the chat PDF. During this step, choose the corext search database, warehouse and the public schema when prompted. snowflake and snowflake-ml-python package needs to be chosen as dependency for the code to run.
 
 import streamlit as st
 from snowflake.core import Root # requires snowflake>=0.8.0
