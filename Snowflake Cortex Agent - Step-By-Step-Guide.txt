@@ -1,0 +1,4 @@
+1. Run SQL to create database, schema, warehouse, tables, enter records into tables, a cortex search service and a stage to upload YAML file.
+2. Upload the semantic model which will be used by Cortex Analyst.
+3. Create Streamlit App. Replace the code in the app with the tutorial code. The tutorial code uses Cortex Agent API. The code takes the semantic model and search service name as tools.
+4. Run the app. First run a analytical query which Cortex Agent understands and then ask for a summary of the result from the answer of the first query. Since it is a summary Cortex Agent understands that and used the serch service to retrieve data. 
